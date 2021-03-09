@@ -1,0 +1,126 @@
+package com.cloudera.examples
+import org.apache.spark.sql._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.streaming.Trigger
+import org.apache.spark.sql.types.StringType
+
+import scala.io.Source
+
+object KafkaStreamWithPhoenix_LocalRun  {
+
+  def main(args: Array[String]): Unit = {
+
+   /* val ksourcetopic = args(0)
+    val kbrokers = args(1)
+    val startingOffsets = args(2) //ie latest
+    val s3bucket = args(3)
+    val checkpoint = args(4)  //ie s3 bucket
+    val zkUrl= args(5)
+    val lookupTblName= args(6)
+    val ktargettopic = args(7) */
+
+       val ksourcetopic = "moad-covid-json"
+    val kbrokers = "kafkabrokers:9093"
+    val startingOffsets = "earliest"
+    //val s3bucket = args(3)
+    val checkpoint ="/tmp/spark-checkpoint1/"  //ie s3 bucket
+    val zkUrl= "zkquorum:2181"
+    val lookupTblName= "country_lookup"
+    val ktargettopic = "moad-covid-json-merged"
+    println("\n*******************************")
+    println("\n*******************************")
+    println("\n**********INPUTS***************")
+    println("\n**********INPUTS***************")
+    println("\n**********INPUTS***************")
+    println("source topic: "+ksourcetopic)
+    println("brokers: "+kbrokers)
+    println("startingOffsets: "+startingOffsets)
+   // println("s3bucket: "+s3bucket)
+    println("checkpoint: "+checkpoint)
+    println("\n*******************************")
+    println("\n*******************************")
+
+
+      
+      val spark = SparkSession.builder
+      .appName("Spark Kafka Secure Structured Streaming Example")
+      .master("local")
+      .config("spark.kafka.bootstrap.servers", kbrokers)
+      .config("spark.kafka.sasl.kerberos.service.name", "kafka")
+      .config("spark.kafka.security.protocol", "SASL_SSL")
+      .config("kafka.sasl.mechanism", "PLAIN")
+      .config("spark.driver.extraJavaOptions", "-Djava.security.auth.login.config=./src/main/resources/jaas.conf")
+      .config("spark.executor.extraJavaOptions", "-Djava.security.auth.login.config=./src/main/resources/jaas.conf")
+      .config("spark.kafka.ssl.truststore.location", "./src/main/resources/truststore.jks")
+      .getOrCreate()
+
+    spark.sparkContext.setLogLevel("INFO")
+    val phoenixConnector= new PhoenixConnector(spark,zkUrl,lookupTblName)
+    import spark.implicits._
+
+    //get schema and broadcast
+    val jsonStr = covidschema.coviddata
+    val covidDataScheme = spark.read.json(Seq(jsonStr).toDS).toDF().schema
+    covidDataScheme.printTreeString()
+    val broadcastSchema = spark.sparkContext.broadcast(covidDataScheme)
+
+    //read moad stream
+    val dfreadstream = spark.readStream.format("kafka")
+      .option("kafka.bootstrap.servers", kbrokers)
+      .option("subscribe", ksourcetopic)
+      .option("startingOffsets", startingOffsets)
+      .option("kafka.sasl.kerberos.service.name", "kafka")
+      .option("kafka.ssl.truststore.location", "./src/main/resources/truststore.jks")
+      .option("kafka.security.protocol", "SASL_SSL")
+      .option("kafka.sasl.mechanism", "PLAIN")
+      .option("failOnDataLoss", "false")
+      .option("checkpointLocation", checkpoint)
+      .load()
+
+
+
+
+   val covidDataDf= dfreadstream.selectExpr("CAST(key AS STRING)", "CAST(value AS STRING)")
+      .select(from_json($"value", schema = broadcastSchema.value).as("data"))
+      .select(
+        $"data".getItem("location").alias("location"),
+        $"data".getItem("country_code").alias("country_code"),
+        $"data".getItem("latitude").alias("latitude"),
+        $"data".getItem("longitude").alias("longitude"),
+        $"data".getItem("confirmed").alias("confirmed"),
+        $"data".getItem("dead").alias("dead"),
+        $"data".getItem("recovered").alias("recovered"),
+        $"data".getItem("velocity_confirmed").alias("velocity_confirmed"),
+        $"data".getItem("velocity_dead").alias("velocity_dead"),
+        $"data".getItem("velocity_recovered").alias("velocity_recovered"),
+        $"data".getItem("updated_date").alias("updated_date"),
+        $"data".getItem("eventTimeLong").alias("eventTimeLong")
+      )
+
+      val lookupDataDf= phoenixConnector.getLookupData(lookupTblName)
+   
+      
+      //lookupDataDf.show()
+      val finalDf= covidDataDf.join(lookupDataDf,covidDataDf("country_code") === lookupDataDf("country_code"), "LEFTOUTER")
+          .select('location,'country_code,'country_name,'latitude,'longitude,'confirmed,'dead,'recovered,'velocity_confirmed)
+          
+          
+       val ds = finalDf.select(to_json( struct( finalDf.columns.map(col(_)):_*  ) )  as "json")
+         .writeStream.format("kafka")
+            .outputMode("update")
+      .option("kafka.bootstrap.servers", kbrokers)
+      .option("topic", ktargettopic)
+      .option("kafka.sasl.kerberos.service.name", "kafka")
+      .option("kafka.ssl.truststore.location", "./src/main/resources/truststore.jks")
+      .option("kafka.security.protocol", "SASL_SSL")
+      .option("kafka.sasl.mechanism", "PLAIN")
+      .option("checkpointLocation", "/tmp/spark-checkpoint2/")
+      .start()
+      .awaitTermination()
+      
+      
+
+
+
+  }
+}
